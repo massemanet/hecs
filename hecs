@@ -1,0 +1,289 @@
+#!/bin/bash
+
+set -euo pipefail
+
+ID=~/.ssh/id_rsa_wg2
+
+declare -A bastion=(
+    [prod]=bastion.prod.loltel.co \
+    [staging]=bastion.staging.loltel.co \
+    [test]=bastion.test.loltel.co)
+
+declare -A meta=()
+
+err() {
+    echo "$1"
+    exit 1
+}
+
+meta+=([list-clusters]="PROFILE;")
+list-clusters() {
+    [ -n "${1:-""}" ]  || err "no profile"
+    local PROFILE="$1"
+
+    $(_aws-env "$PROFILE") aws ecs list-clusters | jq -r '.clusterArns[]' | cut -f2 -d"/" | sort
+}
+
+meta+=([list-task-definition-families]="PROFILE")
+list-task-definition-families() {
+    [ -n "${1:-""}" ]  || err "no profile"
+    local PROFILE="$1"
+    $(_aws-env "$PROFILE") aws ecs list-task-definition-families | jq -r ".families[]"
+}
+
+meta+=([list-task-definitions]="PROFILE")
+list-task-definitions() {
+    [ -n "${1:-""}" ]  || err "no profile"
+    local PROFILE="$1"
+    $(_aws-env "$PROFILE") aws ecs list-task-definitions | jq -r ".taskDefinitionArns[]" | cut -f2 -d"/" | sort
+}
+
+meta+=([list-attributes]="PROFILE;CLUSTER")
+list-attributes() {
+    [ -n "${1:-""}" ]  || err "no profile"
+    local PROFILE="$1"
+    [ -n "${2:-""}" ]  || err "no cluster"
+    CLUSTER="$2"
+
+    $(_aws-env "$PROFILE") aws ecs list-attributes --cluster "$CLUSTER" --target-type container-instance | jq '.attributes'
+}
+
+meta+=([list-services]="PROFILE;CLUSTER")
+list-services() {
+    [ -n "${1:-""}" ]  || err "no profile"
+    local PROFILE="$1"
+    [ -n "${2:-""}" ]  || err "no cluster"
+    CLUSTER="$2"
+
+    $(_aws-env "$PROFILE") aws ecs list-services --cluster "$CLUSTER" | jq -r ".serviceArns[]" | cut -f2 -d"/" | sort
+}
+
+meta+=([list-container-instances]="PROFILE;CLUSTER;")
+list-container-instances() {
+    [ -n "${1:-""}" ]  || err "no profile"
+    local PROFILE="$1"
+    [ -n "${2:-""}" ]  || err "no cluster"
+    CLUSTER="$2"
+
+    $(_aws-env "$PROFILE") aws ecs list-container-instances --cluster "$CLUSTER" | jq -r ".containerInstanceArns[]" | cut -f2 -d"/"
+}
+
+meta+=([describe-cluster]="PROFILE;CLUSTER")
+describe-cluster() {
+    [ -n "${1:-""}" ]  || err "no profile"
+    local PROFILE="$1"
+    [ -n "${2:-""}" ]  || err "no cluster"
+    CLUSTER="$2"
+
+    $(_aws-env "$PROFILE") aws ecs describe-clusters --clusters "$CLUSTER" | jq -r '.clusters[]'
+}
+
+meta+=([describe-service]="PROFILE;CLUSTER;TASKDEF")
+describe-service() {
+    [ -n "${1:-""}" ]  || err "no profile"
+    local PROFILE="$1"
+    [ -n "${2:-""}" ]  || err "no cluster"
+    CLUSTER="$2"
+    [ -n "${3:-""}" ]  || err "no service"
+    SERVICE="$(echo "$3" | cut -f1 -d":")"
+
+    $(_aws-env "$PROFILE") aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" | jq '.services[]'
+}
+
+meta+=([list-tasks]="PROFILE;CLUSTER;TASKDEF")
+list-tasks() {
+    [ -n "${1:-""}" ]  || err "no profile"
+    local PROFILE="$1"
+    [ -n "${2:-""}" ]  || err "no cluster"
+    CLUSTER="$2"
+    [ -n "${3:-""}" ]  || err "no task-definition"
+    TASKDEF="$3"
+
+    local tasks
+    task=()
+    while read -r task
+    do tasks+=("$task")
+    done < <($(_aws-env "$PROFILE") aws ecs list-tasks --cluster "$CLUSTER" | jq -r ".taskArns[]" | cut -f2 -d"/")
+    $(_aws-env "$PROFILE") aws ecs describe-tasks \
+        --cluster "$CLUSTER" \
+        --tasks "${tasks[@]}" \
+        | jq -r ".tasks[] | select(.taskDefinitionArn | test(\"$TASKDEF\")) | .taskArn" \
+        | cut -f2 -d"/"
+}
+
+meta+=([describe-task-definition]="PROFILE;CLUSTER;TASKDEF")
+describe-task-definition() {
+    [ -n "${1:-""}" ]  || err "no profile"
+    local PROFILE="$1"
+    [ -n "${3:-""}" ]  || err "no task definition"
+    TASKDEF="$3"
+    $(_aws-env "$PROFILE") aws ecs describe-task-definition --task-definition "$TASKDEF" | jq ".taskDefinition"
+}
+
+
+meta+=([describe-task]="PROFILE;CLUSTER;TASKDEF;TASK")
+describe-task() {
+    [ -n "${1:-""}" ]  || err "no profile"
+    local PROFILE="$1"
+    [ -n "${2:-""}" ]  || err "no cluster"
+    CLUSTER="$2"
+    [ -n "${4:-""}" ]  || err "no task"
+    TASK="$4"
+
+    $(_aws-env "$PROFILE") aws ecs describe-tasks \
+        --cluster "$CLUSTER" \
+        --tasks "$TASK" \
+        | jq ".tasks[]"
+}
+
+meta+=([describe-container-instance]="PROFILE;CLUSTER;CONTAINERINSTANCE")
+describe-container-instance() {
+    [ -n "${1:-""}" ]  || err "no profile"
+    local PROFILE="$1"
+    [ -n "${2:-""}" ]  || err "no cluster"
+    CLUSTER="$2"
+    [ -n "${5:-""}" ]  || err "no container-instance"
+    INSTANCE="$5"
+
+    $(_aws-env "$PROFILE") aws ecs describe-container-instances --cluster "$CLUSTER" --container-instances "$INSTANCE" | jq ".containerInstances[]"
+}
+
+meta+=([describe-docker]="PROFILE;CLUSTER;TASKDEF;TASK;DOCKERNAME")
+describe-docker() {
+    [ -n "${1:-""}" ]  || err "no profile"
+    local PROFILE="$1"
+    [ -n "${2:-""}" ]  || err "no cluster"
+    CLUSTER="$2"
+    [ -n "${4:-""}" ]  || err "no task"
+    TASK="$4"
+    [ -n "${5:-""}" ]  || err "no dockername"
+    DOCKERNAME="$5"
+
+    command="docker inspect $DOCKERNAME"
+    exec-ssh "$PROFILE" "$CLUSTER" "$TASK" "-tt" "$command" | jq '.[]'
+}
+
+meta+=([list-dockers]="PROFILE;CLUSTER;TASKDEF;TASK")
+list-dockers() {
+    [ -n "${1:-""}" ]  || err "no profile"
+    local PROFILE="$1"
+    [ -n "${2:-""}" ]  || err "no cluster"
+    CLUSTER="$2"
+    [ -n "${4:-""}" ]  || err "no task"
+    TASK="$4"
+
+    ecs_tasks="$(exec-ssh "$PROFILE" "$CLUSTER" "$TASK" "" "curl -s 'http://127.0.0.1:51678/v1/tasks'")"
+    echo "$ecs_tasks" | jq -r ".Tasks[] | select(.Arn | test(\"$TASK\")) | .Containers[].DockerName"
+}
+
+# get a shell in a container instance
+meta+=([docker]="PROFILE;CLUSTER;TASKDEF;TASK;DOCKERNAME")
+docker() {
+    [ -n "${1:-""}" ]  || err "no profile"
+    local PROFILE="$1"
+    [ -n "${2:-""}" ]  || err "no cluster"
+    CLUSTER="$2"
+    [ -n "${4:-""}" ]  || err "no task"
+    TASK="$4"
+    [ -n "${5:-""}" ]  || err "no dockername"
+    DOCKERNAME="$5"
+
+    command="docker exec -it --detach-keys ctrl-q,ctrl-q $DOCKERNAME sh"
+    exec-ssh "$PROFILE" "$CLUSTER" "$TASK" "-tt" "$command"
+}
+
+# get a shell on an EC2 instance
+meta+=([conn]="PROFILE;CLUSTER;TASKDEF;TASK")
+conn() {
+    [ -n "${1:-""}" ]  || err "no profile"
+    local PROFILE="$1"
+    [ -n "${2:-""}" ]  || err "no cluster"
+    local CLUSTER="$2"
+    [ -n "${4:-""}" ]  || err "no task"
+    local TASK="$4"
+
+    exec-ssh "$PROFILE" "$CLUSTER" "$TASK" "-tt"
+}
+
+## helpers
+
+# execute a SSH command on an instance through a bastion
+exec-ssh() {
+    [ -n "${1:-""}" ]  || err "no profile"
+    local PROFILE="$1"
+    [ -n "${2:-""}" ] || err "no cluster"
+    local CLUSTER="$2"
+    [ -n "${3:-""}" ] || err "no TASK"
+    local TASK="$3"
+    [ -n "${4:-""}" ] && local SSHFLAGS="${4}"
+    [ -n "${5:-""}" ] && local CMD="${5}"
+
+    ecs_container_instance="$(describe-task "$PROFILE" "$CLUSTER" "" "$TASK" | jq -r ".containerInstanceArn" | cut -f2 -d"/")"
+    ec2_id="$(describe-container-instance "$PROFILE" "$CLUSTER" "" "" "$ecs_container_instance" | jq -r '.ec2InstanceId')"
+    ec2_instance_data="$(ec2-describe-instance "$PROFILE" "$ec2_id")"
+#    keyfile="$(echo "$ec2_instance_data" | jq -r '.KeyName')"
+    local secretname=ssh/ecs-generic-rsa
+    tmpkeyfile="$(get-keyfile "$PROFILE" "$secretname")"
+    ec2_ip="$(echo "$ec2_instance_data" | jq -r '.PrivateIpAddress')"
+    ssh \
+        ${SSHFLAGS+$SSHFLAGS} \
+        -i "$tmpkeyfile" \
+        -o PermitLocalCommand="yes" \
+        -o LocalCommand="rm $tmpkeyfile" \
+        -o ProxyCommand="ssh ubuntu@${bastion[$PROFILE]} -i $ID -W %h:%p" \
+        "core@$ec2_ip" \
+        ${CMD+$CMD}
+}
+
+# describe an EC2 instance that's happens to be run by ECS
+ec2-describe-instance() {
+    [ -n "${1:-""}" ]  || err "no profile"
+    local PROFILE="$1"
+    [ -n "${2:-""}" ]  || err "no instance ID"
+    EC2_ID="$2"
+
+    $(_aws-env "$PROFILE") aws ec2 describe-instances --instance-ids "$EC2_ID" \
+        --filters "Name=instance-state-name,Values=running" \
+        | jq '.Reservations[].Instances[]'
+}
+
+# temp key from secretnaman
+get-keyfile() {
+    [ -n "${1:-""}" ]  || err "no profile"
+    local PROFILE="$1"
+    [ -n "${2:-""}" ]  || err "no secret"
+    local secret="$2"
+    local keyfile
+    keyfile=$(mktemp "/tmp/key-$PROFILE-XXX")
+
+    $(_aws-env "$PROFILE") aws secretsmanager get-secret-value --secret-id "$secret" \
+        | jq -r '.SecretString' > "$keyfile"
+    chmod 600 "$keyfile"
+
+    echo "$keyfile"
+}
+
+# if $AWS_VAULT is unset, we do `aws-vault exec`
+_aws-env() {
+    [ -z "${AWS_VAULT+x}" ] && echo "aws-vault exec $1 --"
+}
+
+_profile() {
+    if [ -z "${AWS_VAULT+x}" ]
+    then grep -Eo "profile [a-zA-Z_0-9-]+" ~/.aws/config | cut -c9-
+    else echo "$AWS_VAULT"
+    fi
+}
+
+## entrypoint
+
+case "${1:-""}" in
+    "")   err "press TAB";;
+    list) echo "${!meta[*]}" ; exit 0;;
+    profile) _profile ; exit 0;;
+    *)
+        case "${2:-""}" in
+            "") err "press TAB";;
+            *) "$2" "$1" "${@:3}";;
+        esac;;
+esac
