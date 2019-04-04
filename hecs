@@ -11,11 +11,45 @@ declare -A bastion=(
 
 declare -A meta=()
 
+usage() {
+    cat <<EOF
+
+  hecs is helper for navigating ECS. It's mostly a thin wrapper around
+'aws ecs'; its power comes from hecs' ability to tab complete at every
+level.
+
+  It is often helpful to think of ECS entities as forming a graph;
+  profile -> cluster -> task-definition -> task -> instance -> container
+
+  hecs takes one path through such a graph as input, and can
+
+'list' objects on the next level
+'describe' the current object
+'connect' to the obejct (if it is an instance or a container)
+
+  'hecs list-commands' shows available commands.
+
+EOF
+}
+
 err() {
     echo "$1"
     exit 1
 }
 
+
+meta+=([list-commands]="")
+list-commands() {
+    echo "${!meta[*]}"
+}
+
+meta+=([list-profiles]="")
+list-profiles() {
+    if [ -z "${AWS_VAULT+x}" ]
+    then grep -Eo "profile [a-zA-Z_0-9-]+" ~/.aws/config | cut -c9-
+    else echo "$AWS_VAULT"
+    fi
+}
 meta+=([list-clusters]="PROFILE;")
 list-clusters() {
     [ -n "${1:-""}" ]  || err "no profile"
@@ -122,7 +156,7 @@ list-tasks() {
         | cut -f2 -d"/"
 }
 
-meta+=([list-dockers]="PROFILE;CLUSTER;TASKDEF;TASK;CONTAINERINSTANCE")
+meta+=([list-dockers]="PROFILE;CLUSTER;TASKDEF;TASK;INSTANCE")
 list-dockers() {
     [ -n "${1:-""}" ]  || err "no profile"
     local PROFILE="$1"
@@ -195,7 +229,7 @@ describe-task() {
         | jq ".tasks[]"
 }
 
-meta+=([describe-container-instance]="PROFILE;CLUSTER;TASKDEF;TASK;CONTAINERINSTANCE")
+meta+=([describe-container-instance]="PROFILE;CLUSTER;TASKDEF;TASK;INSTANCE")
 describe-container-instance() {
     [ -n "${1:-""}" ]  || err "no profile"
     local PROFILE="$1"
@@ -211,7 +245,7 @@ describe-container-instance() {
 }
 
 # describe an EC2 instance that's happens to be run by ECS
-meta+=([describe-ec2-instance]="PROFILE;CLUSTER;TASKDEF;TASK;CONTAINERINSTANCE")
+meta+=([describe-ec2-instance]="PROFILE;CLUSTER;TASKDEF;TASK;INSTANCE")
 describe-ec2-instance() {
     [ -n "${1:-""}" ]  || err "no profile"
     local PROFILE="$1"
@@ -229,7 +263,7 @@ describe-ec2-instance() {
         | jq '.Reservations[].Instances[]'
 }
 
-meta+=([describe-docker]="PROFILE;CLUSTER;TASKDEF;TASK;CONTAINERINSTANCE;DOCKERNAME")
+meta+=([describe-docker]="PROFILE;CLUSTER;TASKDEF;TASK;INSTANCE;DOCKERNAME")
 describe-docker() {
     [ -n "${1:-""}" ]  || err "no profile"
     local PROFILE="$1"
@@ -246,7 +280,7 @@ describe-docker() {
 }
 
 # get a shell in a container instance
-meta+=([connect-docker]="PROFILE;CLUSTER;TASKDEF;TASK;CONTAINERINSTANCE;DOCKERNAME")
+meta+=([connect-docker]="PROFILE;CLUSTER;TASKDEF;TASK;INSTANCE;DOCKERNAME")
 connect-docker() {
     [ -n "${1:-""}" ]  || err "no profile"
     local PROFILE="$1"
@@ -262,7 +296,7 @@ connect-docker() {
 }
 
 # get a shell on an EC2 instance
-meta+=([connect-instance]="PROFILE;CLUSTER;TASKDEF;TASK;CONTAINERINSTANCE")
+meta+=([connect-instance]="PROFILE;CLUSTER;TASKDEF;TASK;INSTANCE")
 connect-instance() {
     [ -n "${1:-""}" ]  || err "no profile"
     local PROFILE="$1"
@@ -325,18 +359,9 @@ _aws-env() {
     [ -z "${AWS_VAULT+x}" ] && [ -z "${AWS_ACCESS_KEY_ID+x}" ] && echo "aws-vault exec $1 --"
 }
 
-_profile() {
-    if [ -z "${AWS_VAULT+x}" ]
-    then grep -Eo "profile [a-zA-Z_0-9-]+" ~/.aws/config | cut -c9-
-    else echo "$AWS_VAULT"
-    fi
-}
-
 ## entrypoint
 
 case "${1:-""}" in
-    "")   err "press TAB";;
-    list) echo "${!meta[*]}" ; exit 0;;
-    profile) _profile ; exit 0;;
+    "" | "help") usage;;
     *) "$1" "${@:2}";;
 esac
