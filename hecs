@@ -19,7 +19,7 @@ usage() {
 level.
 
   It is often helpful to think of ECS entities as forming a graph;
-  profile -> cluster -> task-definition -> task -> instance -> container
+  profile -> cluster -> service -> instance -> container
 
   hecs takes one path through such a graph as input, and can
 
@@ -37,7 +37,6 @@ err() {
     exit 1
 }
 
-
 meta+=([list-commands]="")
 list-commands() {
     echo "${!meta[*]}"
@@ -50,6 +49,7 @@ list-profiles() {
     else echo "$AWS_VAULT"
     fi
 }
+
 meta+=([list-clusters]="PROFILE;")
 list-clusters() {
     [ -n "${1:-""}" ]  || err "no profile"
@@ -68,17 +68,6 @@ list-task-definition-families() {
         jq -r ".families[]"
 }
 
-meta+=([list-task-definitions]="PROFILE")
-list-task-definitions() {
-    [ -n "${1:-""}" ]  || err "no profile"
-    local PROFILE="$1"
-    $(_aws-env "$PROFILE") aws ecs list-task-definitions |\
-        jq -r ".taskDefinitionArns[]" |\
-        cut -f2 -d"/" |\
-        sort
-}
-
-meta+=([list-attributes]="PROFILE;CLUSTER")
 list-attributes() {
     [ -n "${1:-""}" ]  || err "no profile"
     local PROFILE="$1"
@@ -105,7 +94,7 @@ list-services() {
         sort
 }
 
-meta+=([list-container-instances]="PROFILE;CLUSTER;")
+meta+=([list-instances]="PROFILE;CLUSTER")
 list-container-instances() {
     [ -n "${1:-""}" ]  || err "no profile"
     local PROFILE="$1"
@@ -118,60 +107,70 @@ list-container-instances() {
         cut -f2 -d"/"
 }
 
-meta+=([list-instances]="PROFILE;CLUSTER;TASKDEF:TASK")
-list-instances() {
+meta+=([list-service-instances]="PROFILE;CLUSTER;SERVICE")
+list-service-instances() {
     [ -n "${1:-""}" ]  || err "no profile"
     local PROFILE="$1"
     [ -n "${2:-""}" ]  || err "no cluster"
     local CLUSTER="$2"
-    [ -n "${4:-""}" ]  || err "no task"
-    local TASK="$4"
+    [ -n "${3:-""}" ]  || err "no service"
+    local SERVICE="$3"
 
-    describe-task "$PROFILE" "$CLUSTER" "" "$TASK" |\
-        jq -r ".containerInstanceArn" |\
+    $(_aws-env "$PROFILE") aws ecs describe-tasks \
+                           --cluster "$CLUSTER" \
+                           --tasks $(list-tasks "$PROFILE" "$CLUSTER" "$SERVICE") |\
+        jq -r '.tasks[].containerInstanceArn' |\
         cut -f2 -d"/"
 }
 
-meta+=([list-tasks]="PROFILE;CLUSTER;TASKDEF")
+meta+=([list-tasks]="PROFILE;CLUSTER;SERVICE")
 list-tasks() {
     [ -n "${1:-""}" ]  || err "no profile"
     local PROFILE="$1"
     [ -n "${2:-""}" ]  || err "no cluster"
     local CLUSTER="$2"
-    [ -n "${3:-""}" ]  || err "no task-definition"
-    local TASKDEF="$3"
+    [ -n "${3:-""}" ]  || err "no service"
+    local SERVICE="$3"
 
-    local tasks
-    task=()
-    while read -r task
-    do tasks+=("$task")
-    done < <($(_aws-env "$PROFILE") aws ecs list-tasks \
-                                    --cluster "$CLUSTER" |\
-                 jq -r ".taskArns[]" |\
-                 cut -f2 -d"/")
-    $(_aws-env "$PROFILE") aws ecs describe-tasks \
-        --cluster "$CLUSTER" \
-        --tasks "${tasks[@]}" \
-        | jq -r ".tasks[] | select(.taskDefinitionArn | test(\"$TASKDEF\")) | .taskArn" \
-        | cut -f2 -d"/"
+    $(_aws-env "$PROFILE") aws ecs list-tasks --cluster "$CLUSTER" --service "$SERVICE" |\
+        jq -r '.taskArns[]' |\
+        cut -f2 -d"/"
 }
 
-meta+=([list-dockers]="PROFILE;CLUSTER;TASKDEF;TASK;INSTANCE")
+meta+=([list-task-definitions]="PROFILE;CLUSTER;SERVICE")
+list-task-definition() {
+    [ -n "${1:-""}" ]  || err "no profile"
+    local PROFILE="$1"
+    [ -n "${2:-""}" ]  || err "no cluster"
+    local CLUSTER="$2"
+    [ -n "${3:-""}" ]  || err "no service"
+    local SERVICE="$3"
+
+    $(_aws-env "$PROFILE") aws ecs describe-tasks \
+                           --cluster "$CLUSTER" \
+                           --tasks $(list-tasks "$PROFILE" "$CLUSTER" "$SERVICE") |\
+        jq -r '.tasks[].taskDefinitionArn' |\
+        cut -f2 -d"/" |\
+        sort -u
+}
+
+meta+=([list-dockers]="PROFILE;CLUSTER;SERVICE;INSTANCE")
 list-dockers() {
     [ -n "${1:-""}" ]  || err "no profile"
     local PROFILE="$1"
     [ -n "${2:-""}" ]  || err "no cluster"
     local CLUSTER="$2"
-    [ -n "${4:-""}" ]  || err "no task"
-    local TASK="$4"
-    [ -n "${5:-""}" ]  || err "no instance"
-    local INSTANCE="$5"
+    [ -n "${3:-""}" ]  || err "no service"
+    local SERVICE="$3"
+    [ -n "${4:-""}" ]  || err "no instance"
+    local INSTANCE="$4"
+
     local ecs_tasks
     local cmd="curl -s 'http://127.0.0.1:51678/v1/tasks'"
 
     ecs_tasks="$(_exec-ssh "$PROFILE" "$CLUSTER" "$INSTANCE" "" "$cmd")"
     echo "$ecs_tasks" |\
-        jq -r ".Tasks[] | select(.Arn | test(\"$TASK\")) | .Containers[].DockerName"
+        jq -r ".Tasks[] | select(.Family == \"$SERVICE\") | .Containers[].DockerName"
 }
 
 meta+=([describe-cluster]="PROFILE;CLUSTER")
@@ -186,57 +185,41 @@ describe-cluster() {
         jq -r '.clusters[]'
 }
 
-meta+=([describe-service]="PROFILE;CLUSTER;TASKDEF")
+meta+=([describe-service]="PROFILE;CLUSTER;SERVICE")
 describe-service() {
     [ -n "${1:-""}" ]  || err "no profile"
     local PROFILE="$1"
     [ -n "${2:-""}" ]  || err "no cluster"
-    CLUSTER="$2"
+    local CLUSTER="$2"
     [ -n "${3:-""}" ]  || err "no service"
-    SERVICE="$(echo "$3" | cut -f1 -d":")"
+    local SERVICE="$3"
 
-    $(_aws-env "$PROFILE") aws ecs describe-services \
+    TASKDEF="$(list-task-definition "$PROFILE" "$CLUSTER" "$SERVICE")"
+    TASKS="$(list-tasks "$PROFILE" "$CLUSTER" "$SERVICE")"
+
+    UNO="$($(_aws-env "$PROFILE") aws ecs describe-services \
                            --cluster "$CLUSTER" \
                            --services "$SERVICE" |\
-        jq '.services[]'
+        jq '.services[] | del(.events)')"
+
+    DUE="$($(_aws-env "$PROFILE") aws ecs describe-task-definition \
+                           --task-definition "$TASKDEF")"
+
+    TRES="$($(_aws-env "$PROFILE") aws ecs describe-tasks \
+            --cluster "$CLUSTER" \
+            --tasks $TASKS)"
+
+    jq -n "$UNO + $DUE + $TRES"
 }
 
-meta+=([describe-task-definition]="PROFILE;CLUSTER;TASKDEF")
-describe-task-definition() {
-    [ -n "${1:-""}" ]  || err "no profile"
-    local PROFILE="$1"
-    [ -n "${3:-""}" ]  || err "no task definition"
-    local TASKDEF="$3"
-
-    $(_aws-env "$PROFILE") aws ecs describe-task-definition \
-                           --task-definition "$TASKDEF" |\
-        jq ".taskDefinition"
-}
-
-
-meta+=([describe-task]="PROFILE;CLUSTER;TASKDEF;TASK")
-describe-task() {
-    [ -n "${1:-""}" ]  || err "no profile"
-    local PROFILE="$1"
-    [ -n "${2:-""}" ]  || err "no cluster"
-    local CLUSTER="$2"
-    [ -n "${4:-""}" ]  || err "no task"
-    local TASK="$4"
-
-    $(_aws-env "$PROFILE") aws ecs describe-tasks \
-        --cluster "$CLUSTER" \
-        --tasks "$TASK" \
-        | jq ".tasks[]"
-}
-
-meta+=([describe-container-instance]="PROFILE;CLUSTER;TASKDEF;TASK;INSTANCE")
+meta+=([describe-container-instance]="PROFILE;CLUSTER;SERVICE;INSTANCE")
 describe-container-instance() {
     [ -n "${1:-""}" ]  || err "no profile"
     local PROFILE="$1"
     [ -n "${2:-""}" ]  || err "no cluster"
     local CLUSTER="$2"
-    [ -n "${5:-""}" ]  || err "no container-instance"
-    local INSTANCE="$5"
+    [ -n "${4:-""}" ]  || err "no container-instance"
+    local INSTANCE="$4"
 
     $(_aws-env "$PROFILE") aws ecs describe-container-instances \
                            --cluster "$CLUSTER" \
@@ -245,34 +228,34 @@ describe-container-instance() {
 }
 
 # describe an EC2 instance that's happens to be run by ECS
-meta+=([describe-ec2-instance]="PROFILE;CLUSTER;TASKDEF;TASK;INSTANCE")
+meta+=([describe-ec2-instance]="PROFILE;CLUSTER;SERVICE;INSTANCE")
 describe-ec2-instance() {
     [ -n "${1:-""}" ]  || err "no profile"
     local PROFILE="$1"
     [ -n "${2:-""}" ]  || err "no cluster"
     local CLUSTER="$2"
-    [ -n "${5:-""}" ]  || err "no instance"
-    local INSTANCE="$5"
-    local ec2_id
+    [ -n "${4:-""}" ]  || err "no instance"
+    local INSTANCE="$4"
 
-    ec2_id="$(describe-container-instance "$PROFILE" "$CLUSTER" "" "" "$INSTANCE" |\
+    local ec2_id
+    ec2_id="$(describe-container-instance "$PROFILE" "$CLUSTER" "" "$INSTANCE" |\
                                            jq -r '.ec2InstanceId')"
     $(_aws-env "$PROFILE") aws ec2 describe-instances \
                            --instance-ids "$ec2_id" \
-                           --filters "Name=instance-state-name,Values=running" \
-        | jq '.Reservations[].Instances[]'
+                           --filters "Name=instance-state-name,Values=running" |\
+        jq '.Reservations[].Instances[]'
 }
 
-meta+=([describe-docker]="PROFILE;CLUSTER;TASKDEF;TASK;INSTANCE;DOCKERNAME")
+meta+=([describe-docker]="PROFILE;CLUSTER;SERVICE;INSTANCE;DOCKERNAME")
 describe-docker() {
     [ -n "${1:-""}" ]  || err "no profile"
     local PROFILE="$1"
     [ -n "${2:-""}" ]  || err "no cluster"
     local CLUSTER="$2"
     [ -n "${4:-""}" ]  || err "no task"
-    local INSTANCE="$5"
-    [ -n "${6:-""}" ]  || err "no dockername"
-    local DOCKERNAME="$6"
+    local INSTANCE="$4"
+    [ -n "${5:-""}" ]  || err "no dockername"
+    local DOCKERNAME="$5"
 
     local command="docker inspect $DOCKERNAME"
     _exec-ssh "$PROFILE" "$CLUSTER" "$INSTANCE" "-tt" "$command" |\
@@ -280,30 +263,30 @@ describe-docker() {
 }
 
 # get a shell in a container instance
-meta+=([connect-docker]="PROFILE;CLUSTER;TASKDEF;TASK;INSTANCE;DOCKERNAME")
+meta+=([connect-docker]="PROFILE;CLUSTER;SERVICE;INSTANCE;DOCKERNAME")
 connect-docker() {
     [ -n "${1:-""}" ]  || err "no profile"
     local PROFILE="$1"
     [ -n "${2:-""}" ]  || err "no cluster"
     local CLUSTER="$2"
-    [ -n "${5:-""}" ]  || err "no instance"
-    local TASK="$5"
-    [ -n "${6:-""}" ]  || err "no dockername"
-    local DOCKERNAME="$6"
+    [ -n "${4:-""}" ]  || err "no instance"
+    local INSTANCE="$4"
+    [ -n "${5:-""}" ]  || err "no dockername"
+    local DOCKERNAME="$5"
 
     local command="docker exec -it --detach-keys ctrl-q,ctrl-q $DOCKERNAME sh"
-    _exec-ssh "$PROFILE" "$CLUSTER" "$TASK" "-tt" "$command"
+    _exec-ssh "$PROFILE" "$CLUSTER" "$INSTANCE" "-tt" "$command"
 }
 
 # get a shell on an EC2 instance
-meta+=([connect-instance]="PROFILE;CLUSTER;TASKDEF;TASK;INSTANCE")
+meta+=([connect-instance]="PROFILE;CLUSTER;SERVICE;INSTANCE")
 connect-instance() {
     [ -n "${1:-""}" ]  || err "no profile"
     local PROFILE="$1"
     [ -n "${2:-""}" ]  || err "no cluster"
     local CLUSTER="$2"
-    [ -n "${5:-""}" ]  || err "no instance"
-    local INSTANCE="$5"
+    [ -n "${4:-""}" ]  || err "no instance"
+    local INSTANCE="$4"
 
     _exec-ssh "$PROFILE" "$CLUSTER" "$INSTANCE" "-tt"
 }
@@ -322,7 +305,7 @@ _exec-ssh() {
     [ -n "${5:-""}" ] && local CMD="${5}"
     local ec2_instance_data keyname secretname tmpkeyfile ec2_ip
 
-    ec2_instance_data="$(describe-ec2-instance "$PROFILE" "$CLUSTER" "" "" "$INSTANCE")"
+    ec2_instance_data="$(describe-ec2-instance "$PROFILE" "$CLUSTER" "" "$INSTANCE")"
     keyname="$(echo "$ec2_instance_data" | jq -r '.KeyName')"
     secretname=ssh/$keyname-rsa
     tmpkeyfile="$(_get-keyfile "$PROFILE" "$secretname")"
