@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -euo pipefail
 
@@ -45,7 +45,10 @@ list-commands() {
 meta+=([list-profiles]="")
 list-profiles() {
     if [ -z "${AWS_VAULT+x}" ]
-    then grep -Eo "profile [a-zA-Z_0-9-]+" ~/.aws/config | cut -c9-
+    then if [ -f ~/.aws/config ]
+         then grep -Eo "profile [a-zA-Z_0-9-]+" ~/.aws/config | cut -c9-
+         else err "No AWS config"
+         fi
     else echo "$AWS_VAULT"
     fi
 }
@@ -339,7 +342,12 @@ _get-keyfile() {
 
 # if $AWS_VAULT is unset, we do `aws-vault exec`
 _aws-env() {
-    [ -z "${AWS_VAULT+x}" ] && [ -z "${AWS_ACCESS_KEY_ID+x}" ] && echo "aws-vault exec $1 --"
+    if [ -z "${AWS_VAULT+x}" ] && [ -z "${AWS_ACCESS_KEY_ID+x}" ]
+    then if [ -x aws-vault ]
+         then echo "aws-vault exec $1 --"
+         else err "no AWS credentials"
+         fi
+    fi
 }
 
 ## entrypoint
